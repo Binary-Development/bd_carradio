@@ -1,6 +1,6 @@
 # bd_carradio
 
-Vehicle radio for FiveM that plays **YouTube** audio with real **3D positional sound** — distance falloff, HRTF panning, and cabin muffling. No YouTube API key, no embedded players, no iframes.
+Vehicle radio for FiveM that plays **YouTube** audio with real **3D positional sound** - distance falloff, HRTF panning, and cabin muffling. No YouTube API key, no embedded players, no iframes.
 
 Audio is resolved on the server with **yt-dlp**, cached to disk, and streamed to clients as plain media files through a Web Audio graph.
 
