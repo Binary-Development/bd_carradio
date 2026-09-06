@@ -1,93 +1,12 @@
 local radios = {}
 local levels = {}
+local repeats = {}
 local viewers = {}
 local lastRequest = {}
 local lastSearch = {}
 local verifyRates = {}
-local pending = {}
-local sequence = 0
-local revision = 0
 local playing = 0
-
-local verifyWindow = 10000
-local verifyPerWindow = 40
-
-local function askResolver(event, query)
-    sequence = sequence + 1
-
-    local id = sequence
-    local p = promise.new()
-    pending[id] = p
-
-    SetTimeout(config.advanced.resolverTimeoutMs * 3 + 5000, function()
-        if not pending[id] then return end
-        pending[id] = nil
-        p:resolve({ ok = false, error = 'the resolver did not answer' })
-    end)
-
-    TriggerEvent(event, id, query)
-    return Citizen.Await(p)
-end
-
-local function fromSelf()
-    local invoker = GetInvokingResource()
-    return not invoker or invoker == GetCurrentResourceName()
-end
-
-local function settleResolver(id, payload)
-    if not fromSelf() then return end
-
-    local p = pending[id]
-    if not p then return end
-
-    pending[id] = nil
-
-    local ok, decoded = pcall(json.decode, payload)
-    p:resolve(ok and type(decoded) == 'table' and decoded or { ok = false, error = 'bad resolver reply' })
-end
-
-AddEventHandler('binary-radio:internal:resolved', settleResolver)
-AddEventHandler('binary-radio:internal:searched', settleResolver)
-
-local function prefetch(videoId)
-    TriggerEvent('binary-radio:internal:prefetch', videoId)
-end
-
-local mimes = {
-    ['.m4a'] = 'audio/mp4',
-    ['.mp4'] = 'audio/mp4',
-    ['.webm'] = 'audio/webm',
-    ['.opus'] = 'audio/ogg',
-    ['.ogg'] = 'audio/ogg',
-    ['.mp3'] = 'audio/mpeg',
-}
-
-local extensions = { '.m4a', '.mp4', '.webm', '.opus', '.ogg', '.mp3' }
-local memory = {}
-local memoryOrder = {}
-local memoryLimit = 6
-
-local function readTrack(id)
-    local held = memory[id]
-    if held then return held.data, held.mime end
-
-    for i = 1, #extensions do
-        local extension = extensions[i]
-        local data = LoadResourceFile(GetCurrentResourceName(), ('data/cache/%s%s'):format(id, extension))
-
-        if data and #data > 0 then
-            memory[id] = { data = data, mime = mimes[extension] }
-            memoryOrder[#memoryOrder + 1] = id
-
-            while #memoryOrder > memoryLimit do
-                local oldest = table.remove(memoryOrder, 1)
-                memory[oldest] = nil
-            end
-
-            return data, mimes[extension]
-        end
-    end
-end
+local globalSession = 0
 
 local streamToken = ('%s-%d'):format(GetCurrentResourceName(), math.random(100000, 999999))
 
@@ -104,163 +23,75 @@ SetHttpHandler(function(request, response)
     end
 
     local id = request.path:match('^/stream/([%w_-]+)$')
-
     if not id or #id ~= 11 then
         response.writeHead(404, { ['Access-Control-Allow-Origin'] = '*' })
         response.send('')
         return
     end
 
-    local data, mime = readTrack(id)
+    local range = request.headers and (request.headers.Range or request.headers.range)
+    local fetched = Stream.fetch(id, range)
 
-    if not data then
+    if not fetched then
         response.writeHead(404, { ['Access-Control-Allow-Origin'] = '*' })
         response.send('')
         return
     end
 
-    local total = #data
-    local range = request.headers and (request.headers.Range or request.headers.range)
-    local first, last = nil, nil
-
-    if range and not range:find(',', 1, true) then
-        local from, to = range:match('^bytes=(%d*)%-(%d*)$')
-        if from then
-            first = from ~= '' and math.tointeger(tonumber(from)) or 0
-            last = to ~= '' and math.tointeger(tonumber(to)) or total - 1
-
-            if not first or not last or first >= total or last < first then
-                first, last = nil, nil
-            end
-        end
-    end
-
-    if first then
-        if last > total - 1 then last = total - 1 end
-
-        response.writeHead(206, {
-            ['Content-Type'] = mime,
-            ['Content-Range'] = ('bytes %d-%d/%d'):format(first, last, total),
-            ['Content-Length'] = tostring(last - first + 1),
-            ['Accept-Ranges'] = 'bytes',
-            ['Access-Control-Allow-Origin'] = '*',
-            ['Cache-Control'] = 'public, max-age=86400',
-        })
-
-        response.send(data:sub(first + 1, last + 1))
-        return
-    end
-
-    response.writeHead(200, {
-        ['Content-Type'] = mime,
-        ['Content-Length'] = tostring(total),
-        ['Accept-Ranges'] = 'bytes',
+    local headers = {
+        ['Content-Type'] = fetched.mime or 'audio/mp4',
         ['Access-Control-Allow-Origin'] = '*',
-        ['Cache-Control'] = 'public, max-age=86400',
-    })
+        ['Accept-Ranges'] = 'bytes',
+        ['Cache-Control'] = 'public, max-age=300',
+    }
 
-    response.send(data)
-end)
-
-local encoded = {}
-local encodedOrder = {}
-local encodedLimit = 4
-local readTimeoutMs = 90000
-local sending = 0
-local waiting = {}
-local audioPending = {}
-
-local function isPlayingAnywhere(id)
-    for _, radio in pairs(radios) do
-        if radio.track and radio.track.id == id then return true end
+    if type(fetched.headers) == 'table' then
+        local contentRange = fetched.headers['Content-Range'] or fetched.headers['content-range']
+        local contentLength = fetched.headers['Content-Length'] or fetched.headers['content-length']
+        if contentRange then headers['Content-Range'] = contentRange end
+        if contentLength then headers['Content-Length'] = contentLength end
     end
 
-    return false
-end
-
-local function readEncoded(id)
-    local held = encoded[id]
-    if held then return held.mime, held.data end
-
-    sequence = sequence + 1
-
-    local requestId = sequence
-    local p = promise.new()
-    audioPending[requestId] = p
-
-    SetTimeout(readTimeoutMs, function()
-        if not audioPending[requestId] then return end
-        audioPending[requestId] = nil
-        p:resolve({ '', '' })
-    end)
-
-    TriggerEvent('binary-radio:internal:read', requestId, id)
-
-    local reply = Citizen.Await(p)
-    local mime, data = reply[1], reply[2]
-    if mime == '' or data == '' then return nil end
-
-    encoded[id] = { mime = mime, data = data }
-    encodedOrder[#encodedOrder + 1] = id
-
-    while #encodedOrder > encodedLimit do
-        local oldest = table.remove(encodedOrder, 1)
-        encoded[oldest] = nil
+    if not headers['Content-Length'] and fetched.body then
+        headers['Content-Length'] = tostring(#fetched.body)
     end
 
-    return mime, data
-end
-
-AddEventHandler('binary-radio:internal:readAudio', function(requestId, mime, data)
-    if not fromSelf() then return end
-
-    local p = audioPending[requestId]
-    if not p then return end
-
-    audioPending[requestId] = nil
-    p:resolve({ mime or '', data or '' })
+    response.writeHead(fetched.status, headers)
+    response.send(fetched.body)
 end)
 
-local function releaseSend()
-    sending = math.max(0, sending - 1)
-
-    local next = table.remove(waiting, 1)
-    if next then next() end
-end
-
-local function sendAudio(source, id)
-    local mime, data = readEncoded(id)
-
-    if not mime then
-        print(('[binary-radio] %s is not ready to send yet, the client will ask again'):format(id))
-        releaseSend()
+local function checkStreamUrl()
+    if config.audioUrl == '' then
+        Log.print('audiourl is empty - using ^6youtube^7 iframe playback')
         return
     end
 
-    TriggerLatentClientEvent('binary-radio:client:sentAudio', source, config.advanced.transferBytesPerSecond, id, mime, data)
-    SetTimeout(#data / config.advanced.transferBytesPerSecond * 1000, releaseSend)
-end
+    local base = config.audioUrl:gsub('/+$', '')
 
-RegisterNetEvent('binary-radio:server:requestedAudio', function(id)
-    local source = source
-    if type(id) ~= 'string' or #id ~= 11 or not id:match('^[%w_-]+$') then return end
-    if not isPlayingAnywhere(id) then return end
-
-    if sending >= config.advanced.parallelTransfers then
-        if #waiting >= 64 then return end
-        waiting[#waiting + 1] = function() sendAudio(source, id) end
+    if not base:match('^https://') then
+        Log.print('audiourl must use ^6https^7 - check ^6shared/config.lua^7')
         return
     end
 
-    sending = sending + 1
-    sendAudio(source, id)
-end)
+    PerformHttpRequest(base .. '/health', function(status, body)
+        if status == 200 and body == streamToken then
+            Log.print(('stream proxy connected at ^6%s^7'):format(base))
+            return
+        end
+
+        Log.print(('stream proxy failed for ^6%s^7 (%s)'):format(base, tostring(status)))
+    end, 'GET')
+end
+
+local verifyWindow = 10000
+local verifyPerWindow = 40
 
 local function getVehicle(netId)
     if type(netId) ~= 'number' then return nil end
 
     local vehicle = NetworkGetEntityFromNetworkId(netId)
-    if vehicle == 0 or not DoesEntityExist(vehicle) then return nil end
+    if vehicle == 0 or not DoesEntityExist(vehicle) or GetEntityType(vehicle) ~= 2 then return nil end
+    if NetworkGetNetworkIdFromEntity(vehicle) ~= netId then return nil end
 
     return vehicle
 end
@@ -353,6 +184,7 @@ local function snapshot(radio)
         age = radio.playing and math.max(clock() - radio.stampedAt, 0) or 0,
         epoch = radio.epoch,
         sequence = radio.sequence or 0,
+        session = radio.session,
     }
 end
 
@@ -361,11 +193,12 @@ local function publish(netId)
     if not vehicle then return end
 
     local radio = radios[netId]
-    revision = revision + 1
+    local revision = radio and radio.sequence or 0
 
     if not radio or not radio.track then
         Entity(vehicle).state:set('binaryRadio', false, true)
     else
+        revision = revision + 1
         radio.sequence = revision
         Entity(vehicle).state:set('binaryRadio', revision, true)
     end
@@ -377,6 +210,10 @@ local function publish(netId)
             TriggerClientEvent('binary-radio:client:changedRadio', source, netId, payload)
         end
     end
+end
+
+local function forgetEmitter(netId)
+    TriggerClientEvent('binary-radio:client:forgotEmitter', -1, netId)
 end
 
 local function reconcile(source, netId)
@@ -415,6 +252,17 @@ local function publishVolume(netId)
     SetTimeout(volumeCoalesceMs, function() flushVolume(netId) end)
 end
 
+local function pushRepeat(netId)
+    local radio = radios[netId]
+    if not radio then return end
+
+    for source, watching in pairs(viewers) do
+        if watching == netId then
+            TriggerClientEvent('binary-radio:client:changedRepeat', source, netId, radio.repeatOn)
+        end
+    end
+end
+
 local function pushQueue(netId)
     local radio = radios[netId]
     local queue = radio and radio.queue or {}
@@ -431,6 +279,7 @@ local function stopRadio(netId)
 
     radios[netId] = nil
     playing = math.max(0, playing - 1)
+    forgetEmitter(netId)
     publish(netId)
     pushQueue(netId)
 end
@@ -440,14 +289,18 @@ local function startRadio(netId, source)
     if radio then return radio end
     if playing >= config.advanced.maxRadiosPlaying then return nil end
 
+    globalSession = globalSession + 1
+
     radio = {
         queue = {},
         volume = levels[netId] or 0.5,
+        repeatOn = repeats[netId] or false,
         playing = false,
         offset = 0,
         stampedAt = clock(),
         epoch = 0,
         owner = source,
+        session = globalSession,
     }
 
     radios[netId] = radio
@@ -463,6 +316,7 @@ local function arm(radio, track)
     radio.playing = false
     radio.arming = GetGameTimer() + armWindowMs
     stamp(radio, 0)
+    Stream.prefetch(track.id)
 end
 
 local function begin(netId)
@@ -475,9 +329,22 @@ local function begin(netId)
     publish(netId)
 end
 
+local function restart(netId)
+    local radio = radios[netId]
+    if not radio then return end
+
+    stamp(radio, 0)
+    publish(netId)
+end
+
 local function playNext(netId)
     local radio = radios[netId]
     if not radio then return end
+
+    if radio.repeatOn and radio.track then
+        restart(netId)
+        return
+    end
 
     local track = table.remove(radio.queue, 1)
     if not track then return stopRadio(netId) end
@@ -485,17 +352,6 @@ local function playNext(netId)
     arm(radio, track)
     publish(netId)
     pushQueue(netId)
-
-    local upcoming = radio.queue[1]
-    if upcoming then prefetch(upcoming.id) end
-end
-
-local function restart(netId)
-    local radio = radios[netId]
-    if not radio then return end
-
-    stamp(radio, 0)
-    publish(netId)
 end
 
 Callback.register('binary-radio:opened', function(source, netId)
@@ -513,6 +369,7 @@ Callback.register('binary-radio:opened', function(source, netId)
         reason = reason,
         queue = radio and radio.queue or {},
         volume = radio and radio.volume or 0.5,
+        repeatOn = radio and radio.repeatOn or false,
     }
 end)
 
@@ -531,6 +388,7 @@ end
 
 Callback.register('binary-radio:emitter', function(source, netId)
     if type(netId) ~= 'number' or verifyFlooding(source) then return false end
+    if not getVehicle(netId) then return false end
 
     return snapshot(radios[netId])
 end)
@@ -541,7 +399,7 @@ Callback.register('binary-radio:searched', function(source, query)
         return { ok = false, error = 'invalid search' }
     end
 
-    return askResolver('binary-radio:internal:search', query)
+    return Youtube.search(query)
 end)
 
 local function applyTracks(radio, netId, tracks, mode)
@@ -578,9 +436,6 @@ local function applyTracks(radio, netId, tracks, mode)
     publish(netId)
     pushQueue(netId)
 
-    local upcoming = radio.queue[1]
-    if upcoming then prefetch(upcoming.id) end
-
     return true, accepted[1], #accepted
 end
 
@@ -590,7 +445,7 @@ Callback.register('binary-radio:requested', function(source, netId, query, mode)
 
     local allowed, reason = canControl(source, netId)
     if not allowed then return { ok = false, error = reason } end
-    if type(query) ~= 'string' or #query < 5 or #query > 300 then
+    if type(query) ~= 'string' or #query < 2 or #query > 300 then
         return { ok = false, error = 'invalid link' }
     end
 
@@ -602,7 +457,7 @@ Callback.register('binary-radio:requested', function(source, netId, query, mode)
         return { ok = false, error = 'queue is full' }
     end
 
-    local result = askResolver('binary-radio:internal:resolve', query)
+    local result = Youtube.resolve(query)
     local empty = not radio.track and #radio.queue == 0
 
     if not result.ok then
@@ -684,6 +539,12 @@ RegisterNetEvent('binary-radio:server:changedPlayback', function(netId, action, 
         publishVolume(netId)
 
         return
+    elseif action == 'repeat' and type(value) == 'boolean' then
+        radio.repeatOn = value
+        repeats[netId] = value
+        pushRepeat(netId)
+
+        return
     elseif action == 'skip' and type(value) == 'number' then
         if value >= 0 then
             playNext(netId)
@@ -757,15 +618,20 @@ AddEventHandler('playerDropped', function()
     verifyRates[dropped] = nil
 end)
 
+AddEventHandler('entityRemoved', function(entity)
+    local netId = NetworkGetNetworkIdFromEntity(entity)
+    if not netId or netId == 0 or not radios[netId] then return end
+
+    stopRadio(netId)
+end)
+
 CreateThread(function()
     while true do
         Wait(1000)
 
         for netId, radio in pairs(radios) do
             if not getVehicle(netId) then
-                radios[netId] = nil
-                levels[netId] = nil
-                playing = math.max(0, playing - 1)
+                stopRadio(netId)
             elseif radio.arming then
                 if GetGameTimer() > radio.arming then begin(netId) end
             elseif radio.track and radio.playing and elapsed(radio) >= radio.track.duration then
@@ -782,62 +648,30 @@ CreateThread(function()
         for netId in pairs(levels) do
             if not radios[netId] and not getVehicle(netId) then levels[netId] = nil end
         end
-    end
-end)
 
-AddEventHandler('binary-radio:internal:unavailable', function(id)
-    if not fromSelf() then return end
-    if type(id) ~= 'string' then return end
-
-    for netId, radio in pairs(radios) do
-        if radio.track and radio.track.id == id then playNext(netId) end
-    end
-end)
-
-local function checkStreamUrl()
-    if config.audioUrl == '' then
-        print('[binary-radio] audio rides the game connection; set config.audioUrl to move it onto https')
-        return
-    end
-
-    local base = config.audioUrl:gsub('/+$', '')
-
-    if not base:match('^https://') then
-        print(('[binary-radio] config.audioUrl must be https, browsers refuse http audio inside the interface: %s'):format(base))
-        return
-    end
-
-    PerformHttpRequest(base .. '/health', function(status, body)
-        if status == 200 and body == streamToken then
-            print(('[binary-radio] audio streaming is live at %s'):format(base))
-            return
+        for netId in pairs(repeats) do
+            if not radios[netId] and not getVehicle(netId) then repeats[netId] = nil end
         end
-
-        print(('[binary-radio] config.audioUrl (%s) did not answer as this resource [%s]; clients will fall back to the game connection'):format(base, tostring(status)))
-    end, 'GET')
-end
-
-AddEventHandler('binary-radio:internal:ready', function()
-    if not fromSelf() then return end
-    print('[binary-radio] ready')
+    end
 end)
 
 AddEventHandler('onResourceStart', function(resource)
     if resource ~= GetCurrentResourceName() then return end
 
-    TriggerEvent('binary-radio:internal:configure', json.encode({
-        timeoutMs = config.advanced.resolverTimeoutMs,
-        maxParallelDownloads = config.advanced.parallelDownloads,
-        cookiesFile = GetConvar('binary_radio:cookies', ''),
-        proxy = GetConvar('binary_radio:proxy', ''),
-        autoUpdateHours = config.advanced.autoUpdateHours,
-    
-        maxBytes = config.advanced.cacheMaxBytes,
-        ttlHours = (config.advanced.cacheDays * 24),
+    Youtube.configure(config.youtubeApiKey, {
+        maxDurationSeconds = config.maxSongMinutes * 60,
         searchResults = config.searchResults,
-        maxDurationSeconds = (config.maxSongMinutes * 60),
         playlistMaxTracks = config.maxPlaylistTracks,
-    }))
+        timeoutMs = config.advanced.apiTimeoutMs,
+    })
 
+    if config.youtubeApiKey == '' then
+        Log.print('missing ^6youtube^7 api key - set ^6youtubeApiKey^7 in ^6shared/config.lua^7')
+        return
+    end
+
+    local version = Version.current()
+    Log.print(('loaded v%s'):format(version))
     SetTimeout(3000, checkStreamUrl)
+    SetTimeout(5000, Version.check)
 end)

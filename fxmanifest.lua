@@ -3,13 +3,14 @@ game 'gta5'
 lua54 'yes'
 
 author 'Binary Development'
-description 'Vehicle radio streaming YouTube audio with true 3D positional sound, no YouTube API and no iframes'
-version '1.0.0'
+description 'Vehicle radio streaming YouTube audio with true 3D positional sound via the YouTube API'
+version '1.0.1'
 
 ui_page 'web/dist/index.html'
 
 shared_scripts {
     'shared/config.lua',
+    'shared/log.lua',
     'shared/callback.lua',
 }
 
@@ -20,11 +21,11 @@ client_scripts {
     'client/nui.lua',
 }
 
-node_version '22'
-
 server_scripts {
+    'server/youtube.lua',
+    'server/stream.lua',
+    'server/version.lua',
     'server/main.lua',
-    'server/resolver.js',
 }
 
 files {

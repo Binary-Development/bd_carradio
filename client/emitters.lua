@@ -10,11 +10,13 @@ local idleWait = 900
 local activeWait = 100
 local movingWait = 33
 local movingSpeed = 4.0
-local maxPitch = 85.0
-local staleAfter = 60000
 
 function Emitters.setStreamBase(base)
     streamBase = base
+end
+
+function Emitters.emitterId(netId, session)
+    return ('%s:%s'):format(netId, session or 0)
 end
 
 local function offsetOf(data)
@@ -64,6 +66,7 @@ local function sanitise(value)
         age = math.min(math.max(tonumber(value.age) or 0, 0), duration),
         epoch = tonumber(value.epoch) or 0,
         sequence = tonumber(value.sequence) or 0,
+        session = tonumber(value.session) or 0,
     }
 end
 
@@ -73,8 +76,25 @@ local function forget(netId)
     tracked[netId] = nil
     trackedCount = trackedCount - 1
     TriggerEvent('binary-radio:client:changedEmitter', netId, nil)
+end
 
-    if trackedCount == 0 then emit() end
+local function vehicleAlive(netId, entry)
+    if type(netId) ~= 'number' then return false end
+
+    local entity = entry and entry.entity
+    if entity and entity ~= 0 and DoesEntityExist(entity) and GetEntityType(entity) == 2 then
+        if NetworkGetNetworkIdFromEntity(entity) == netId then
+            return true, entity
+        end
+    end
+
+    if not NetworkDoesEntityExistWithNetworkId(netId) then return false end
+
+    entity = NetworkGetEntityFromNetworkId(netId)
+    if entity == 0 or not DoesEntityExist(entity) or GetEntityType(entity) ~= 2 then return false end
+    if NetworkGetNetworkIdFromEntity(entity) ~= netId then return false end
+
+    return true, entity
 end
 
 local predictionWindow = 2500
@@ -110,7 +130,7 @@ local function reconcile(entry, data)
     local agrees = data.playing == predicted.playing
         and math.abs(data.offset - predicted.offset) < predictionTolerance
 
-    if agrees or data.id ~= entry.data.id or GetGameTimer() > predicted.expires then
+    if agrees or data.id ~= entry.data.id or data.epoch ~= predicted.epoch or GetGameTimer() > predicted.expires then
         entry.predicted = nil
         return data
     end
@@ -124,11 +144,23 @@ local function reconcile(entry, data)
 end
 
 local function remember(netId, data)
+    local alive, vehicle = vehicleAlive(netId)
+    if not alive then return end
+
     local entry = tracked[netId]
     local previous = entry and entry.data
 
     if entry and entry.sequence and data.sequence < entry.sequence then return end
     if entry then entry.sequence = data.sequence end
+
+    if previous and previous.session ~= data.session then
+        entry = nil
+        previous = nil
+    end
+
+    if entry and previous and data.epoch ~= previous.epoch then
+        entry.predicted = nil
+    end
 
     if previous and previous.anchoredAt and data.epoch == previous.epoch and data.id == previous.id then
         data.offset = previous.offset
@@ -140,9 +172,10 @@ local function remember(netId, data)
     if entry then
         reconcileVolume(entry, data)
         entry.data = reconcile(entry, data)
+        entry.entity = vehicle
     else
         trackedCount = trackedCount + 1
-        tracked[netId] = { data = data, sequence = data.sequence }
+        tracked[netId] = { data = data, sequence = data.sequence, entity = vehicle }
     end
 
     TriggerEvent('binary-radio:client:changedEmitter', netId, data)
@@ -153,6 +186,8 @@ function Emitters.set(netId, value)
         forget(netId)
         return
     end
+
+    if not vehicleAlive(netId, tracked[netId]) then return end
 
     local data = sanitise(value)
     if data then remember(netId, data) end
@@ -225,10 +260,45 @@ local function enqueueVerify(netId)
     verifyQueue[verifyQueueSize] = netId
 end
 
-AddStateBagChangeHandler('binaryRadio', nil, function(bagName)
+AddStateBagChangeHandler('binaryRadio', nil, function(bagName, _, value)
     local netId = tonumber(bagName:match('entity:(%d+)'))
     if not netId then return end
+
+    if not value or value == false then
+        verifyMeta[netId] = nil
+        if tracked[netId] then
+            forget(netId)
+            emit()
+        end
+        return
+    end
+
     enqueueVerify(netId)
+end)
+
+RegisterNetEvent('binary-radio:client:forgotEmitter', function(netId)
+    if type(netId) ~= 'number' then return end
+    verifyMeta[netId] = nil
+    forget(netId)
+    emit()
+end)
+
+AddEventHandler('entityRemoved', function(entity)
+    for netId, entry in pairs(tracked) do
+        if entry.entity == entity then
+            verifyMeta[netId] = nil
+            forget(netId)
+            emit()
+            return
+        end
+    end
+
+    local netId = NetworkGetNetworkIdFromEntity(entity)
+    if not netId or netId == 0 or not tracked[netId] then return end
+
+    verifyMeta[netId] = nil
+    forget(netId)
+    emit()
 end)
 
 CreateThread(function()
@@ -243,10 +313,7 @@ CreateThread(function()
             end
 
             Wait(250)
-            goto continue
-        end
-
-        do
+        else
             local netId = table.remove(verifyQueue, 1)
             verifyQueueSize = verifyQueueSize - 1
 
@@ -265,24 +332,8 @@ CreateThread(function()
                 meta.rejectedUntil = GetGameTimer() + rejectCooldown
                 forget(netId)
             end
-        end
 
-        Wait(verifyGap)
-        ::continue::
-    end
-end)
-
-CreateThread(function()
-    while true do
-        Wait(60000)
-        local now = GetGameTimer()
-        for netId, meta in pairs(verifyMeta) do
-            local settled = not meta.queued
-            local coolerThanReject = not meta.rejectedUntil or now > meta.rejectedUntil + staleAfter
-            local coolerThanAsk = not meta.lastAsked or now - meta.lastAsked > staleAfter
-            if settled and coolerThanReject and coolerThanAsk and not tracked[netId] then
-                verifyMeta[netId] = nil
-            end
+            Wait(verifyGap)
         end
     end
 end)
@@ -290,7 +341,7 @@ end)
 local function cameraFrame()
     local coords = GetGameplayCamCoord()
     local rot = GetGameplayCamRot(2)
-    local pitch = math.max(math.min(rot.x, maxPitch), -maxPitch)
+    local pitch = math.max(math.min(rot.x, 85.0), -85.0)
     local rx, rz = math.rad(pitch), math.rad(rot.z)
     local cosRx = math.cos(rx)
     return coords, -math.sin(rz) * cosRx, math.cos(rz) * cosRx, math.sin(rx)
@@ -305,24 +356,16 @@ function emit()
 
     for index = 1, #audible do audible[index] = nil end
 
-    local now = GetGameTimer()
     local fastest = 0.0
+    local toForget = {}
 
     for netId, entry in pairs(tracked) do
-        local vehicle = NetworkDoesEntityExistWithNetworkId(netId) and NetworkGetEntityFromNetworkId(netId) or 0
+        local alive, vehicle = vehicleAlive(netId, entry)
 
-        if vehicle == 0 or not DoesEntityExist(vehicle) then
-            entry.missingSince = entry.missingSince or now
-            if now - entry.missingSince > staleAfter then
-                tracked[netId] = nil
-                trackedCount = trackedCount - 1
-                verifyMeta[netId] = nil
-            end
-        elseif entry.missingSince then
-            entry.missingSince = nil
-        end
-
-        if vehicle ~= 0 and DoesEntityExist(vehicle) then
+        if not alive then
+            toForget[#toForget + 1] = netId
+        else
+            entry.entity = vehicle
             local coords = GetEntityCoords(vehicle)
             local distance = #(camCoords - coords)
 
@@ -341,7 +384,7 @@ function emit()
                 if speed > fastest then fastest = speed end
                 count = count + 1
                 audible[count] = {
-                    id = tostring(netId),
+                    id = Emitters.emitterId(netId, entry.data.session),
                     track = entry.data.id,
                     url = streamBase ~= '' and ('%s/stream/%s'):format(streamBase, entry.data.id) or '',
                     offset = offsetOf(entry.data),
@@ -361,6 +404,12 @@ function emit()
                 }
             end
         end
+    end
+
+    for i = 1, #toForget do
+        local netId = toForget[i]
+        verifyMeta[netId] = nil
+        forget(netId)
     end
 
     if count > 1 then

@@ -4,6 +4,14 @@ config = {
     permission = '',
     passengersCanControl = true,
 
+    -- credentials: https://console.cloud.google.com/apis/credentials
+    -- enable the api: https://console.cloud.google.com/apis/library/youtube.googleapis.com
+    youtubeApiKey = 'AIzaSyD2kqbWY7UzWWuJFWfWTfh43SQFmiusW88',
+
+    -- public https url that reverse-proxies this resource's /stream endpoint (3d web audio)
+    -- leave empty to use the youtube iframe player instead
+    audioUrl = '',
+
     hearingDistance = 24.0,
     outsideVolume = 0.7,
 
@@ -14,8 +22,6 @@ config = {
 
     blockedSongs = {},
     blockedWords = {},
-
-    audioUrl = '',
 
     advanced = {
         fullVolumeDistance = 3.0,
@@ -34,14 +40,6 @@ config = {
         maxRadiosPlaying = 64,
         maxRadiosHeard = 6,
 
-        cacheMaxBytes = 8 * 1024 * 1024 * 1024,
-        cacheDays = 14,
-
-        transferBytesPerSecond = 2097152,
-        parallelTransfers = 6,
-
-        resolverTimeoutMs = 45000,
-        parallelDownloads = 3,
-        autoUpdateHours = 12,
+        apiTimeoutMs = 30000,
     },
 }

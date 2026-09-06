@@ -35,8 +35,6 @@ local function measure(vehicle)
     return math.min(widest, 1.0) * config.advanced.doorAperture
 end
 
----@param vehicle number
----@return number aperture 0 when sealed, 1 when open to the air, -1 when breached
 local function apertureOf(vehicle)
     local now = GetGameTimer()
     local sample = samples[vehicle]
@@ -71,9 +69,16 @@ function Cabin.outsideAcoustics(vehicle)
     if not DoesEntityExist(vehicle) then return config.advanced.openCutoff, config.outsideVolume end
 
     local aperture = apertureOf(vehicle)
-    if aperture < 0 then return config.advanced.occludedCutoff, config.outsideVolume end
-
     local sealed = config.advanced.sealedCutoff
+    local open = config.advanced.openCutoff
 
-    return sealed * (config.advanced.openCutoff / sealed) ^ aperture, config.outsideVolume
+    if aperture < 0 then
+        return config.advanced.occludedCutoff, config.outsideVolume * 0.55
+    end
+
+    local cutoff = sealed * (open / sealed) ^ aperture
+    local openness = math.min(aperture / config.advanced.doorAperture, 1.0)
+    local gain = config.outsideVolume * (0.18 + 0.82 * openness)
+
+    return cutoff, gain
 end

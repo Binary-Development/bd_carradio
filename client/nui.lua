@@ -6,43 +6,6 @@ local function requireControl()
     return Radio.visible and Radio.netId and Radio.canControl
 end
 
-local asked = {}
-local chunkSize = 262144
-
-RegisterNUICallback('needAudio', function(data, cb)
-    cb(1)
-
-    local id = type(data) == 'table' and data.id or nil
-    if type(id) ~= 'string' then return end
-
-    local now = GetGameTimer()
-    if asked[id] and now - asked[id] < 20000 then return end
-
-    asked[id] = now
-    TriggerServerEvent('binary-radio:server:requestedAudio', id)
-end)
-
-RegisterNetEvent('binary-radio:client:sentAudio', function(id, mime, data)
-    if type(id) ~= 'string' or type(data) ~= 'string' or #data == 0 then return end
-
-    local total = math.ceil(#data / chunkSize)
-
-    CreateThread(function()
-        for index = 1, total do
-            SendNUIMessage({
-                action = 'audioChunk',
-                id = id,
-                mime = mime,
-                index = index,
-                total = total,
-                chunk = data:sub((index - 1) * chunkSize + 1, index * chunkSize),
-            })
-
-            Wait(0)
-        end
-    end)
-end)
-
 RegisterNUICallback('close', function(_, cb)
     Radio.hide()
     cb(1)
@@ -169,6 +132,16 @@ RegisterNUICallback('volume', function(data, cb)
     TriggerServerEvent('binary-radio:server:changedPlayback', Radio.netId, 'volume', volume)
 end)
 
+RegisterNUICallback('repeat', function(data, cb)
+    cb(1)
+    if not requireControl() then return end
+
+    local enabled = type(data) == 'table' and data.enabled == true
+    Radio.repeatOn = enabled
+    Radio.push()
+    TriggerServerEvent('binary-radio:server:changedPlayback', Radio.netId, 'repeat', enabled)
+end)
+
 RegisterNUICallback('queuePlay', function(data, cb)
     cb(1)
     if not requireControl() then return end
@@ -188,9 +161,12 @@ end)
 RegisterNUICallback('trackReady', function(data, cb)
     cb(1)
 
-    local netId = type(data) == 'table' and tonumber(data.id) or nil
+    local emitterId = type(data) == 'table' and data.id or nil
     local track = type(data) == 'table' and data.track or nil
-    if not netId or type(track) ~= 'string' then return end
+    if type(emitterId) ~= 'string' or type(track) ~= 'string' then return end
+
+    local netId = tonumber(emitterId:match('^(%d+):'))
+    if not netId then return end
 
     TriggerServerEvent('binary-radio:server:readiedTrack', netId, track)
 end)
@@ -198,16 +174,15 @@ end)
 RegisterNUICallback('trackEnded', function(data, cb)
     cb(1)
 
-    local netId = type(data) == 'table' and tonumber(data.id) or nil
+    local emitterId = type(data) == 'table' and data.id or nil
+    if type(emitterId) ~= 'string' then return end
+
+    local netId = tonumber(emitterId:match('^(%d+):'))
     if not netId then return end
 
     TriggerServerEvent('binary-radio:server:endedTrack', netId)
 end)
 
-RegisterNUICallback('audioError', function(data, cb)
+RegisterNUICallback('audioError', function(_, cb)
     cb(1)
-    print(('[binary-radio] audio error on emitter %s: %s'):format(
-        type(data) == 'table' and tostring(data.id) or '?',
-        type(data) == 'table' and tostring(data.message) or '?'
-    ))
 end)

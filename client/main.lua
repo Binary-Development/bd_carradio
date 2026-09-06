@@ -2,6 +2,7 @@ Radio = {
     visible = false,
     netId = nil,
     canControl = false,
+    repeatOn = false,
 }
 
 local function notify(message)
@@ -49,6 +50,7 @@ function Radio.push(info)
                 thumbnail = data.thumb,
             } or false,
             queue = info and info.queue or nil,
+            ['repeat'] = Radio.repeatOn,
             status = 'idle',
             statusMessage = '',
         },
@@ -80,6 +82,7 @@ function Radio.show()
     Radio.visible = true
     Radio.netId = netId
     Radio.canControl = info.canControl
+    Radio.repeatOn = info.repeatOn == true
 
     SetNuiFocus(true, true)
     SendNUIMessage({ action = 'visibility', open = true })
@@ -107,8 +110,10 @@ function Radio.toggle()
     Radio.show()
 end
 
-AddEventHandler('binary-radio:client:changedEmitter', function(netId)
-    if Radio.visible and Radio.netId == netId then Radio.push() end
+AddEventHandler('binary-radio:client:changedEmitter', function(netId, data)
+    if not Radio.visible or Radio.netId ~= netId then return end
+    if not data then return Radio.hide() end
+    Radio.push()
 end)
 
 RegisterNetEvent('binary-radio:client:changedRadio', function(netId, data)
@@ -121,6 +126,14 @@ end)
 RegisterNetEvent('binary-radio:client:changedQueue', function(netId, queue)
     if not Radio.visible or Radio.netId ~= netId then return end
     SendNUIMessage({ action = 'state', state = { queue = queue } })
+end)
+
+RegisterNetEvent('binary-radio:client:changedRepeat', function(netId, enabled)
+    if type(netId) ~= 'number' or type(enabled) ~= 'boolean' then return end
+    if not Radio.visible or Radio.netId ~= netId then return end
+
+    Radio.repeatOn = enabled
+    SendNUIMessage({ action = 'state', state = { ['repeat'] = enabled } })
 end)
 
 RegisterCommand('binaryRadioToggle', function()
@@ -146,7 +159,7 @@ end)
 
 CreateThread(function()
     while true do
-        Wait(2000)
+        Wait(500)
 
         if Radio.visible then
             local vehicle = currentVehicle()
