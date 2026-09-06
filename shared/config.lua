@@ -6,7 +6,7 @@ config = {
 
     -- credentials: https://console.cloud.google.com/apis/credentials
     -- enable the api: https://console.cloud.google.com/apis/library/youtube.googleapis.com
-    youtubeApiKey = 'AIzaSyD2kqbWY7UzWWuJFWfWTfh43SQFmiusW88',
+    youtubeApiKey = 'your_api_key',
 
     -- public https url that reverse-proxies this resource's /stream endpoint (3d web audio)
     -- leave empty to use the youtube iframe player instead
