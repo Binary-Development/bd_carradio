@@ -6,10 +6,12 @@ local streamBase = ''
 local audible = {}
 local emit
 
-local idleWait = 900
-local activeWait = 100
-local movingWait = 33
+local idleWait = config.advanced.emitIdleMs
+local activeWait = config.advanced.emitActiveMs
+local movingWait = config.advanced.emitMovingMs
 local movingSpeed = 4.0
+local outOfRangeForgetMs = config.advanced.outOfRangeForgetMs
+local nearbySlack = config.advanced.nearbySlack
 
 function Emitters.setStreamBase(base)
     streamBase = base
@@ -97,6 +99,16 @@ local function vehicleAlive(netId, entry)
     return true, entity
 end
 
+local function nearby(netId)
+    if not NetworkDoesEntityExistWithNetworkId(netId) then return false end
+
+    local vehicle = NetworkGetEntityFromNetworkId(netId)
+    if vehicle == 0 or not DoesEntityExist(vehicle) then return false end
+
+    local distance = #(GetGameplayCamCoord() - GetEntityCoords(vehicle))
+    return distance <= config.hearingDistance + nearbySlack
+end
+
 local predictionWindow = 2500
 local predictionTolerance = 0.75
 local volumeTolerance = 0.02
@@ -173,6 +185,7 @@ local function remember(netId, data)
         reconcileVolume(entry, data)
         entry.data = reconcile(entry, data)
         entry.entity = vehicle
+        entry.outOfRangeSince = nil
     else
         trackedCount = trackedCount + 1
         tracked[netId] = { data = data, sequence = data.sequence, entity = vehicle }
@@ -226,46 +239,8 @@ function Emitters.setOffset(netId, offset)
     predict(entry, data)
 end
 
-local verifyQueue = {}
-local verifyQueueSize = 0
-local verifyMeta = {}
-local verifyCooldown = 3000
-local rejectCooldown = 15000
-local verifyQueueLimit = 24
-local verifyGap = 120
-
-local function enqueueVerify(netId)
-    local meta = verifyMeta[netId]
-    local now = GetGameTimer()
-
-    if meta then
-        if meta.queued then return end
-        if meta.rejectedUntil and now < meta.rejectedUntil then return end
-
-        if meta.lastAsked and now - meta.lastAsked < verifyCooldown then
-            meta.dirty = true
-            return
-        end
-    else
-        meta = {}
-        verifyMeta[netId] = meta
-    end
-
-    meta.dirty = nil
-
-    if verifyQueueSize >= verifyQueueLimit then return end
-
-    meta.queued = true
-    verifyQueueSize = verifyQueueSize + 1
-    verifyQueue[verifyQueueSize] = netId
-end
-
-AddStateBagChangeHandler('binaryRadio', nil, function(bagName, _, value)
-    local netId = tonumber(bagName:match('entity:(%d+)'))
-    if not netId then return end
-
+local function applyStateBag(netId, value)
     if not value or value == false then
-        verifyMeta[netId] = nil
         if tracked[netId] then
             forget(netId)
             emit()
@@ -273,20 +248,27 @@ AddStateBagChangeHandler('binaryRadio', nil, function(bagName, _, value)
         return
     end
 
-    enqueueVerify(netId)
-end)
+    if type(value) ~= 'table' then return end
+    if not tracked[netId] and not nearby(netId) then return end
 
-RegisterNetEvent('binary-radio:client:forgotEmitter', function(netId)
-    if type(netId) ~= 'number' then return end
-    verifyMeta[netId] = nil
-    forget(netId)
-    emit()
+    local data = sanitise(value)
+    if data then
+        remember(netId, data)
+    elseif tracked[netId] then
+        forget(netId)
+        emit()
+    end
+end
+
+AddStateBagChangeHandler('binaryRadio', nil, function(bagName, _, value)
+    local netId = tonumber(bagName:match('entity:(%d+)'))
+    if not netId then return end
+    applyStateBag(netId, value)
 end)
 
 AddEventHandler('entityRemoved', function(entity)
     for netId, entry in pairs(tracked) do
         if entry.entity == entity then
-            verifyMeta[netId] = nil
             forget(netId)
             emit()
             return
@@ -296,46 +278,8 @@ AddEventHandler('entityRemoved', function(entity)
     local netId = NetworkGetNetworkIdFromEntity(entity)
     if not netId or netId == 0 or not tracked[netId] then return end
 
-    verifyMeta[netId] = nil
     forget(netId)
     emit()
-end)
-
-CreateThread(function()
-    while true do
-        if verifyQueueSize == 0 then
-            local now = GetGameTimer()
-
-            for netId, meta in pairs(verifyMeta) do
-                if meta.dirty and (not meta.lastAsked or now - meta.lastAsked >= verifyCooldown) then
-                    enqueueVerify(netId)
-                end
-            end
-
-            Wait(250)
-        else
-            local netId = table.remove(verifyQueue, 1)
-            verifyQueueSize = verifyQueueSize - 1
-
-            local meta = verifyMeta[netId] or {}
-            verifyMeta[netId] = meta
-            meta.queued = nil
-            meta.lastAsked = GetGameTimer()
-
-            local payload = Callback.await('binary-radio:emitter', netId)
-            local data = payload and sanitise(payload) or nil
-
-            if data then
-                meta.rejectedUntil = nil
-                remember(netId, data)
-            else
-                meta.rejectedUntil = GetGameTimer() + rejectCooldown
-                forget(netId)
-            end
-
-            Wait(verifyGap)
-        end
-    end
 end)
 
 local function cameraFrame()
@@ -353,6 +297,7 @@ function emit()
     local camCoords, fx, fy, fz = cameraFrame()
     local maxDistance = config.hearingDistance
     local count = 0
+    local now = GetGameTimer()
 
     for index = 1, #audible do audible[index] = nil end
 
@@ -369,7 +314,14 @@ function emit()
             local coords = GetEntityCoords(vehicle)
             local distance = #(camCoords - coords)
 
-            if distance <= maxDistance then
+            if distance > maxDistance then
+                if not entry.outOfRangeSince then
+                    entry.outOfRangeSince = now
+                elseif now - entry.outOfRangeSince >= outOfRangeForgetMs then
+                    toForget[#toForget + 1] = netId
+                end
+            else
+                entry.outOfRangeSince = nil
                 local inside = playerVehicle == vehicle
                 local cutoff, gain
 
@@ -407,9 +359,7 @@ function emit()
     end
 
     for i = 1, #toForget do
-        local netId = toForget[i]
-        verifyMeta[netId] = nil
-        forget(netId)
+        forget(toForget[i])
     end
 
     if count > 1 then
@@ -450,6 +400,32 @@ CreateThread(function()
             Wait(idleWait)
         else
             Wait(emit())
+        end
+    end
+end)
+
+CreateThread(function()
+    while true do
+        Wait(5000)
+
+        if trackedCount < config.advanced.maxRadiosHeard then
+            local coords = GetGameplayCamCoord()
+            local maxDistance = config.hearingDistance + nearbySlack
+
+            for _, vehicle in ipairs(GetGamePool('CVehicle')) do
+                if DoesEntityExist(vehicle) then
+                    local distance = #(coords - GetEntityCoords(vehicle))
+                    if distance <= maxDistance then
+                        local netId = NetworkGetNetworkIdFromEntity(vehicle)
+                        if netId ~= 0 and not tracked[netId] then
+                            local payload = Entity(vehicle).state.binaryRadio
+                            if type(payload) == 'table' then
+                                applyStateBag(netId, payload)
+                            end
+                        end
+                    end
+                end
+            end
         end
     end
 end)

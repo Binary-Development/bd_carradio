@@ -4,7 +4,6 @@ local repeats = {}
 local viewers = {}
 local lastRequest = {}
 local lastSearch = {}
-local verifyRates = {}
 local playing = 0
 local globalSession = 0
 
@@ -82,9 +81,6 @@ local function checkStreamUrl()
         Log.print(('stream proxy failed for ^6%s^7 (%s)'):format(base, tostring(status)))
     end, 'GET')
 end
-
-local verifyWindow = 10000
-local verifyPerWindow = 40
 
 local function getVehicle(netId)
     if type(netId) ~= 'number' then return nil end
@@ -166,6 +162,7 @@ local function stamp(radio, offset)
     radio.offset = math.max(0, offset or elapsed(radio))
     radio.stampedAt = clock()
     radio.epoch = radio.epoch + 1
+    radio.sequence = (radio.sequence or 0) + 1
 end
 
 local function snapshot(radio)
@@ -193,27 +190,15 @@ local function publish(netId)
     if not vehicle then return end
 
     local radio = radios[netId]
-    local revision = radio and radio.sequence or 0
-
-    if not radio or not radio.track then
-        Entity(vehicle).state:set('binaryRadio', false, true)
-    else
-        revision = revision + 1
-        radio.sequence = revision
-        Entity(vehicle).state:set('binaryRadio', revision, true)
-    end
-
     local payload = snapshot(radio)
+
+    Entity(vehicle).state:set('binaryRadio', payload, true)
 
     for source, watching in pairs(viewers) do
         if watching == netId then
             TriggerClientEvent('binary-radio:client:changedRadio', source, netId, payload)
         end
     end
-end
-
-local function forgetEmitter(netId)
-    TriggerClientEvent('binary-radio:client:forgotEmitter', -1, netId)
 end
 
 local function reconcile(source, netId)
@@ -277,10 +262,20 @@ end
 local function stopRadio(netId)
     if not radios[netId] then return end
 
+    local vehicle = getVehicle(netId)
     radios[netId] = nil
     playing = math.max(0, playing - 1)
-    forgetEmitter(netId)
-    publish(netId)
+
+    if vehicle then
+        Entity(vehicle).state:set('binaryRadio', false, true)
+    end
+
+    for source, watching in pairs(viewers) do
+        if watching == netId then
+            TriggerClientEvent('binary-radio:client:changedRadio', source, netId, false)
+        end
+    end
+
     pushQueue(netId)
 end
 
@@ -371,26 +366,6 @@ Callback.register('binary-radio:opened', function(source, netId)
         volume = radio and radio.volume or 0.5,
         repeatOn = radio and radio.repeatOn or false,
     }
-end)
-
-local function verifyFlooding(source)
-    local now = GetGameTimer()
-    local bucket = verifyRates[source]
-
-    if not bucket or now - bucket.since > verifyWindow then
-        verifyRates[source] = { since = now, count = 1 }
-        return false
-    end
-
-    bucket.count = bucket.count + 1
-    return bucket.count > verifyPerWindow
-end
-
-Callback.register('binary-radio:emitter', function(source, netId)
-    if type(netId) ~= 'number' or verifyFlooding(source) then return false end
-    if not getVehicle(netId) then return false end
-
-    return snapshot(radios[netId])
 end)
 
 Callback.register('binary-radio:searched', function(source, query)
@@ -615,7 +590,6 @@ AddEventHandler('playerDropped', function()
     lastRequest[dropped] = nil
     lastSearch[dropped] = nil
     viewers[dropped] = nil
-    verifyRates[dropped] = nil
 end)
 
 AddEventHandler('entityRemoved', function(entity)
@@ -627,7 +601,7 @@ end)
 
 CreateThread(function()
     while true do
-        Wait(1000)
+        Wait(2000)
 
         for netId, radio in pairs(radios) do
             if not getVehicle(netId) then
@@ -674,4 +648,59 @@ AddEventHandler('onResourceStart', function(resource)
     Log.print(('loaded v%s'):format(version))
     SetTimeout(3000, checkStreamUrl)
     SetTimeout(5000, Version.check)
+end)
+
+exports('stressArm', function(netId, track)
+    if type(netId) ~= 'number' or type(track) ~= 'table' then return false, 'invalid args' end
+    if not getVehicle(netId) then return false, 'vehicle missing' end
+
+    local radio = startRadio(netId, 0)
+    if not radio then return false, 'radio cap reached' end
+
+    arm(radio, {
+        id = track.id,
+        title = track.title or 'Stress Test',
+        author = track.author or 'Benchmark',
+        duration = tonumber(track.duration) or 180,
+        thumbnail = track.thumbnail or track.thumb or '',
+    })
+    begin(netId)
+
+    return true
+end)
+
+exports('stressStop', function(netId)
+    if type(netId) ~= 'number' or not radios[netId] then return false end
+    stopRadio(netId)
+    return true
+end)
+
+exports('stressStopAll', function()
+    for netId in pairs(radios) do
+        stopRadio(netId)
+    end
+end)
+
+exports('stressBumpAll', function()
+    local started = GetGameTimer()
+
+    for netId, radio in pairs(radios) do
+        if radio.track then
+            stamp(radio)
+            publish(netId)
+        end
+    end
+
+    return GetGameTimer() - started
+end)
+
+exports('stressStats', function()
+    local active = 0
+    for _ in pairs(radios) do active = active + 1 end
+
+    return {
+        active = active,
+        cap = config.advanced.maxRadiosPlaying,
+        playing = playing,
+    }
 end)

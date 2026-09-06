@@ -37,8 +37,14 @@ config = {
         requestCooldownMs = 2500,
         searchCooldownMs = 600,
 
-        maxRadiosPlaying = 64,
+        maxRadiosPlaying = 48,
         maxRadiosHeard = 6,
+
+        emitIdleMs = 900,
+        emitActiveMs = 175,
+        emitMovingMs = 66,
+        outOfRangeForgetMs = 12000,
+        nearbySlack = 8.0,
 
         apiTimeoutMs = 30000,
     },

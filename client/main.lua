@@ -5,6 +5,44 @@ Radio = {
     repeatOn = false,
 }
 
+local nuiReady = false
+
+local function pushUi(info)
+    SendNUIMessage({ action = 'visibility', open = true })
+    SendNUIMessage({
+        action = 'audioConfig',
+        options = {
+            refDistance = config.advanced.fullVolumeDistance,
+            maxDistance = config.hearingDistance,
+            rolloff = config.advanced.falloff,
+            panningModel = 'HRTF',
+            crossfadeMs = config.advanced.fadeMs,
+            maxEmitters = config.advanced.maxRadiosHeard,
+        },
+    })
+    Radio.push(info)
+end
+
+local function waitForNui()
+    if nuiReady then return end
+
+    local deadline = GetGameTimer() + 3000
+    while not nuiReady and GetGameTimer() < deadline do
+        SendNUIMessage({ action = 'visibility', open = true })
+        Wait(50)
+    end
+end
+
+RegisterNUICallback('ready', function(_, cb)
+    nuiReady = true
+
+    if Radio.visible then
+        pushUi()
+    end
+
+    cb(1)
+end)
+
 local function notify(message)
     BeginTextCommandThefeedPost('STRING')
     AddTextComponentSubstringPlayerName(message)
@@ -84,21 +122,9 @@ function Radio.show()
     Radio.canControl = info.canControl
     Radio.repeatOn = info.repeatOn == true
 
+    pushUi(info)
+    waitForNui()
     SetNuiFocus(true, true)
-    SendNUIMessage({ action = 'visibility', open = true })
-    SendNUIMessage({
-        action = 'audioConfig',
-        options = {
-            refDistance = config.advanced.fullVolumeDistance,
-            maxDistance = config.hearingDistance,
-            rolloff = config.advanced.falloff,
-            panningModel = 'HRTF',
-            crossfadeMs = config.advanced.fadeMs,
-            maxEmitters = config.advanced.maxRadiosHeard,
-        },
-    })
-
-    Radio.push(info)
 end
 
 function Radio.toggle()
@@ -170,5 +196,6 @@ end)
 
 AddEventHandler('onResourceStop', function(name)
     if name ~= GetCurrentResourceName() then return end
+    nuiReady = false
     SetNuiFocus(false, false)
 end)

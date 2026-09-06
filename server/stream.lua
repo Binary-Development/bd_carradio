@@ -216,8 +216,16 @@ function Stream.fetch(videoId, rangeHeader)
     }
 end
 
+local prefetching = 0
+local prefetchLimit = 4
+
 function Stream.prefetch(videoId)
+    if prefetching >= prefetchLimit then return end
+
+    prefetching = prefetching + 1
+
     CreateThread(function()
         Stream.resolve(videoId)
+        prefetching = math.max(0, prefetching - 1)
     end)
 end
