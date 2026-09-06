@@ -2,6 +2,8 @@
 
 Vehicle radio for FiveM that plays **YouTube** audio with real **3D positional sound** - distance falloff, HRTF panning, and cabin muffling. Uses the **YouTube Data API** for search and metadata, and YouTube's streaming endpoints (resolved server-side) for Web Audio playback.
 
+![bd_carradio preview](web/dist/preview.png)
+
 ## Features
 
 - **Search** YouTube by name or paste a link (watch, Shorts, `youtu.be`, Music)
@@ -19,13 +21,13 @@ Vehicle radio for FiveM that plays **YouTube** audio with real **3D positional s
 - FiveM artifact with **Lua 5.4**
 - A **YouTube Data API v3** key (`config.youtubeApiKey`) - see [YouTube API key setup](#youtube-api-key-setup)
 - Outbound HTTPS from the game server (`googleapis.com`, `youtube.com`, `googlevideo.com`)
-- An **HTTPS reverse proxy** pointing at this resource's HTTP handler (optional, for 3D web audio - see [HTTPS streaming](#https-streaming))
+- An **HTTPS reverse proxy** pointing at this resource's HTTP handler (optional, for 3D web audio - see [HTTPS streaming (`audioUrl`)](#https-streaming-audiourl))
 
 ## Installation
 
 1. Place the resource in your server `resources` folder as `bd_carradio` (or any name you prefer).
 2. Follow [YouTube API key setup](#youtube-api-key-setup) and paste your key into `shared/config.lua`.
-3. Optionally set up [HTTPS streaming](#https-streaming) for 3D web audio.
+3. Optionally set up [HTTPS streaming (`audioUrl`)](#https-streaming-audiourl) for 3D web audio.
 4. Add to `server.cfg`:
 
 ```cfg
@@ -99,17 +101,188 @@ If search or playback fails, double-check that **YouTube Data API v3** is enable
 | Quota exceeded | Default limit is 10,000 units/day; each search uses ~100 units |
 | Key works in browser but not server | Remove HTTP referrer restrictions, or add your server IP if you use IP restrictions |
 
-## HTTPS streaming
+## HTTPS streaming (`audioUrl`)
 
-Browsers inside FiveM's NUI require **HTTPS** audio URLs with CORS headers for Web Audio 3D panning. The resource exposes a built-in HTTP handler at `/stream/{videoId}` that proxies YouTube audio with the correct headers.
+FiveM's in-game browser only allows **HTTPS** audio URLs for Web Audio 3D panning. bd_carradio ships a built-in HTTP handler on your FXServer that proxies YouTube audio with the correct CORS and range-request headers.
 
-Point a reverse proxy (nginx, Caddy, etc.) at your FXServer HTTP port and set `config.audioUrl` to that public HTTPS URL:
+When `audioUrl` is set, clients load audio from:
+
+```text
+https://your-domain.com/stream/{videoId}
+```
+
+That URL must be a **public HTTPS reverse proxy** pointing at your game server's HTTP port. Without it, playback falls back to the YouTube iframe player (works out of the box, but 3D panning and cabin muffling are simulated instead of real).
+
+### What the resource exposes
+
+| Path | Purpose |
+|------|---------|
+| `/health` | Health check - returns a token so the resource can verify your proxy on startup |
+| `/stream/{videoId}` | Proxied YouTube audio (11-character video id) |
+
+Both endpoints are served by FXServer itself. You do **not** host separate audio files - you only proxy traffic from your domain to the game server.
+
+### Before you start
+
+1. **FXServer port** - note the TCP port in `server.cfg` (default `30120`). The examples below use `30120`; change it if yours differs.
+2. **Domain** - a subdomain is fine, e.g. `radio.yourserver.com`.
+3. **TLS certificate** - required for HTTPS. Use [Let's Encrypt](https://letsencrypt.org/) (free) via Caddy or Certbot on Linux.
+4. **Firewall** - players only need port **443** on your proxy. The game port (`30120`) can stay local-only; the proxy talks to `127.0.0.1:30120` on the same machine.
+
+### Linux setup (nginx)
+
+Install nginx and Certbot on your FXServer host (Debian/Ubuntu example):
+
+```bash
+sudo apt update
+sudo apt install nginx certbot python3-certbot-nginx
+```
+
+Create `/etc/nginx/sites-available/bd-carradio`:
+
+```nginx
+server {
+    listen 80;
+    server_name radio.yourserver.com;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name radio.yourserver.com;
+
+    # certbot will fill these in, or set paths manually
+    ssl_certificate     /etc/letsencrypt/live/radio.yourserver.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/radio.yourserver.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:30120;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # required for seek / scrubbing in the radio UI
+        proxy_set_header Range $http_range;
+        proxy_pass_request_headers on;
+        proxy_buffering off;
+    }
+}
+```
+
+Enable the site and get a certificate:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/bd-carradio /etc/nginx/sites-enabled/
+sudo certbot --nginx -d radio.yourserver.com
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### Linux setup (Caddy)
+
+Caddy is simpler if you prefer automatic HTTPS with almost no config. Install [Caddy](https://caddyserver.com/docs/install), then create `/etc/caddy/Caddyfile`:
+
+```caddy
+radio.yourserver.com {
+    reverse_proxy 127.0.0.1:30120
+}
+```
+
+Start or reload Caddy:
+
+```bash
+sudo systemctl enable --now caddy
+sudo systemctl reload caddy
+```
+
+Caddy obtains and renews the TLS certificate automatically.
+
+### Windows setup (Caddy)
+
+Caddy is the easiest option on Windows because it handles HTTPS certificates for you.
+
+1. Download Caddy for Windows from [caddyserver.com/download](https://caddyserver.com/download).
+2. Create a folder, e.g. `C:\caddy`, and place `caddy.exe` there.
+3. Create `C:\caddy\Caddyfile`:
+
+```caddy
+radio.yourserver.com {
+    reverse_proxy 127.0.0.1:30120
+}
+```
+
+4. Open **Windows Firewall** and allow inbound **TCP 443** (and **80** for the initial certificate challenge).
+5. Point your DNS A record for `radio.yourserver.com` at this machine's public IP.
+6. Run Caddy from an elevated prompt (or install as a service):
+
+```powershell
+cd C:\caddy
+.\caddy.exe run --config Caddyfile
+```
+
+To run in the background as a Windows service, use [NSSM](https://nssm.cc/) or Caddy's built-in `caddy start` after `caddy install`.
+
+### Windows setup (nginx)
+
+If you already use nginx on Windows:
+
+1. Download nginx from [nginx.org](https://nginx.org/en/download.html) and extract it, e.g. to `C:\nginx`.
+2. Add a `server` block to `conf\nginx.conf` (same as the [Linux nginx example](#linux-setup-nginx) above - proxy to `127.0.0.1:30120`).
+3. Obtain a certificate with [win-acme](https://www.win-acme.com/) or copy certs from another tool into paths nginx can read.
+4. Start nginx:
+
+```powershell
+cd C:\nginx
+.\nginx.exe
+```
+
+Reload after config changes: `.\nginx.exe -s reload`
+
+### Configure bd_carradio
+
+Set the **public HTTPS base URL** (no trailing slash, no `/stream` path) in `shared/config.lua`:
 
 ```lua
 audioUrl = 'https://radio.yourserver.com',
 ```
 
-Without `audioUrl`, playback uses the YouTube iframe player instead (instant start, simulated muffling outside the car).
+Restart the resource or server. On startup you should see:
+
+```text
+[bd_carradio] stream proxy connected at https://radio.yourserver.com
+```
+
+If the proxy is wrong or unreachable:
+
+```text
+[bd_carradio] stream proxy failed for https://radio.yourserver.com (404)
+```
+
+### Verify it works
+
+1. **Health check** - from any machine with curl:
+
+```bash
+curl https://radio.yourserver.com/health
+```
+
+You should get a short token string (not HTML, not 404).
+
+2. **In-game** - open the car radio, play a track. With `audioUrl` set, audio uses Web Audio 3D panning; you should hear direction and distance outside the vehicle.
+
+3. **Leave `audioUrl` empty** if you cannot set up HTTPS yet - the YouTube iframe fallback still works, just without full 3D audio.
+
+### `audioUrl` troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `stream proxy failed` on startup | DNS not pointing at the server, proxy not running, or wrong port in `proxy_pass` |
+| `audiourl must use https` | Use `https://` in config, not `http://` |
+| Health returns 404 or nginx default page | Proxy is not forwarding to FXServer, or FXServer is on a different port |
+| Health works but no audio in-game | Check server console for stream resolve errors; confirm outbound HTTPS to `youtube.com` / `googlevideo.com` |
+| Seeking / progress bar broken | Ensure nginx passes the `Range` header (see config above) |
+| Certificate errors in NUI | Use a valid public CA cert (Let's Encrypt). Self-signed certs will not work in FiveM's browser |
+| Proxy on a different machine | Point `proxy_pass` / `reverse_proxy` at the FXServer's **LAN IP** and port instead of `127.0.0.1` |
 
 ## Usage
 
