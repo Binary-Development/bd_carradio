@@ -1,45 +1,103 @@
 # bd_carradio
 
-Vehicle radio for FiveM that plays **YouTube** audio with real **3D positional sound** — distance falloff, HRTF panning, and cabin muffling. Uses the **YouTube Data API** for search and metadata, and YouTube's streaming endpoints (resolved server-side) for Web Audio playback.
-
-![bd_carradio preview](web/dist/preview.png)
+Vehicle radio for FiveM that plays **YouTube** audio with real **3D positional sound** - distance falloff, HRTF panning, and cabin muffling. Uses the **YouTube Data API** for search and metadata, and YouTube's streaming endpoints (resolved server-side) for Web Audio playback.
 
 ## Features
 
 - **Search** YouTube by name or paste a link (watch, Shorts, `youtu.be`, Music)
 - **Queue** up to 25 tracks per vehicle with play, skip, seek, and volume
-- **Playlists** — saved playlists (`list=PL...`) load in order; first track plays, the rest queue behind it
-- **True 3D audio** — outside listeners hear direction and distance; open doors and broken windows affect muffling
+- **Playlists** - saved playlists (`list=PL...`) load in order; first track plays, the rest queue behind it
+- **True 3D audio** - outside listeners hear direction and distance; open doors and broken windows affect muffling
 - **Occupants** hear the stereo directly (no ear-flicker from an HRTF panner on top of them)
-- **Blocklist** — ban specific video ids or words in titles and channel names
-- **HTTPS streaming** — serve proxied audio from your own reverse proxy for 3D panning (recommended)
-- **Passenger control** — configurable; driver-only mode supported
-- **View-only mode** — passengers without control still hear nearby radios
+- **Blocklist** - ban specific video ids or words in titles and channel names
+- **HTTPS streaming** - serve proxied audio from your own reverse proxy for 3D panning (recommended)
+- **Passenger control** - configurable; driver-only mode supported
+- **View-only mode** - passengers without control still hear nearby radios
 
 ## Requirements
 
 - FiveM artifact with **Lua 5.4**
-- A **YouTube Data API v3** key with the YouTube Data API enabled (`config.youtubeApiKey`)
+- A **YouTube Data API v3** key (`config.youtubeApiKey`) - see [YouTube API key setup](#youtube-api-key-setup)
 - Outbound HTTPS from the game server (`googleapis.com`, `youtube.com`, `googlevideo.com`)
-- An **HTTPS reverse proxy** pointing at this resource's HTTP handler (for 3D panning — see below)
+- An **HTTPS reverse proxy** pointing at this resource's HTTP handler (optional, for 3D web audio - see [HTTPS streaming](#https-streaming))
 
 ## Installation
 
 1. Place the resource in your server `resources` folder as `bd_carradio` (or any name you prefer).
-2. Set your YouTube Data API key in `shared/config.lua`:
-
-```lua
-youtubeApiKey = 'YOUR_API_KEY_HERE',
-```
-
-3. Set up HTTPS streaming (required for 3D panning) — see [HTTPS streaming](#https-streaming) below.
+2. Follow [YouTube API key setup](#youtube-api-key-setup) and paste your key into `shared/config.lua`.
+3. Optionally set up [HTTPS streaming](#https-streaming) for 3D web audio.
 4. Add to `server.cfg`:
 
 ```cfg
 ensure bd_carradio
 ```
 
-5. Restart the server. You should see `[binary-radio] ready` in the console.
+5. Restart the server. You should see `[bd_carradio] loaded v1.0.1` in the console.
+
+## YouTube API key setup
+
+You need a **YouTube Data API v3** key from Google Cloud. This is free for normal server use (Google gives 10,000 quota units per day by default).
+
+### 1. Create a Google Cloud project
+
+1. Open [Google Cloud Console](https://console.cloud.google.com/).
+2. Sign in with a Google account.
+3. Click the project dropdown at the top (next to "Google Cloud").
+4. Click **New project**.
+5. Enter a name (for example `fivem-carradio`) and click **Create**.
+6. Make sure that project is selected in the top bar.
+
+### 2. Enable the YouTube Data API v3
+
+1. Open the [YouTube Data API v3 library page](https://console.cloud.google.com/apis/library/youtube.googleapis.com).
+2. Confirm the correct project is selected at the top.
+3. Click **Enable**.
+4. Wait until it finishes enabling.
+
+### 3. Create an API key
+
+1. Open [APIs & Services > Credentials](https://console.cloud.google.com/apis/credentials).
+2. Click **+ Create credentials** at the top.
+3. Choose **API key**.
+4. Copy the key that appears (it starts with `AIza...`).
+
+### 4. Restrict the key (recommended)
+
+1. On the credentials page, click your new API key to edit it.
+2. Under **API restrictions**, choose **Restrict key**.
+3. Select **YouTube Data API v3** from the list.
+4. Click **Save**.
+
+This stops the key from being used with other Google APIs if it ever leaks.
+
+### 5. Add the key to bd_carradio
+
+1. Open `shared/config.lua` in this resource.
+2. Set your key:
+
+```lua
+youtubeApiKey = 'AIzaSy...your_key_here...',
+```
+
+3. Save the file and restart the resource (or the whole server).
+
+### 6. Test it
+
+1. Start the server and check the console for `[bd_carradio] loaded v...`.
+2. Join the server, get in a vehicle, and open the radio (`/carradio` or **G** by default).
+3. Search for a song or paste a YouTube link.
+
+If search or playback fails, double-check that **YouTube Data API v3** is enabled on the same project as the key.
+
+### Common issues
+
+| Problem | Fix |
+|---------|-----|
+| `missing youtube api key` in console | `youtubeApiKey` is empty in `shared/config.lua` |
+| Search returns nothing / API errors | Enable **YouTube Data API v3** on your Google Cloud project |
+| `API key not valid` | Copy the full key again; make sure there are no extra spaces |
+| Quota exceeded | Default limit is 10,000 units/day; each search uses ~100 units |
+| Key works in browser but not server | Remove HTTP referrer restrictions, or add your server IP if you use IP restrictions |
 
 ## HTTPS streaming
 
@@ -51,7 +109,7 @@ Point a reverse proxy (nginx, Caddy, etc.) at your FXServer HTTP port and set `c
 audioUrl = 'https://radio.yourserver.com',
 ```
 
-Without `audioUrl`, audio falls back to the game connection (slower, no seeking over HTTPS, but 3D panning still works via blob URLs).
+Without `audioUrl`, playback uses the YouTube iframe player instead (instant start, simulated muffling outside the car).
 
 ## Usage
 
@@ -69,12 +127,12 @@ Without `audioUrl`, audio falls back to the game connection (slower, no seeking 
 | Link type | Example | Behaviour |
 |-----------|---------|-------------|
 | **Saved playlist** | `list=PL...` | Exact track list and order |
-| **YouTube Mix / Radio** | `list=RD...` | Algorithmic mix — may not match what you see in the YouTube app |
+| **YouTube Mix / Radio** | `list=RD...` | Algorithmic mix - may not match what you see in the YouTube app |
 | **Watch Later / Liked** | `list=WL`, `list=LM...` | Not supported (requires OAuth) |
 
 ## Configuration
 
-Main options in `config.lua`:
+Main options in `shared/config.lua`:
 
 | Option | Description |
 |--------|-------------|
@@ -95,7 +153,9 @@ Main options in `config.lua`:
 
 ## How 3D audio works
 
-The YouTube IFrame Player cannot be routed through Web Audio's `PannerNode` (cross-origin restriction). Instead, the server resolves a direct audio stream URL via YouTube's internal player API and proxies it. The NUI loads that audio into an `HTMLAudioElement` connected to a Web Audio graph with HRTF panning, lowpass filtering, and cabin muffling.
+When `audioUrl` is set, the server resolves a direct audio stream URL and proxies it. The NUI loads that audio into an `HTMLAudioElement` connected to a Web Audio graph with HRTF panning, lowpass filtering, and cabin muffling.
+
+Without `audioUrl`, the YouTube iframe player handles playback. Volume and muffling are simulated, but true 3D panning is limited.
 
 ## API quota
 
